@@ -38,7 +38,9 @@ const NAV = [
   { href: "/journal", label: "Daily journal", icon: NotebookPen },
   { href: "/trades", label: "Trades", icon: ListOrdered },
   { href: "/reports", label: "Reports", icon: BarChart3 },
-  { href: "/prop-firms", label: "Prop firms", icon: Landmark },
+  // Campaign replaces the built-in prop tracker: accounts, firm rules and
+  // payouts are owned by Trading Manager Pro, not by the journal's own tables.
+  { href: "/campaign", label: "Campaign", icon: Landmark },
   { href: "/notebook", label: "Notebook", icon: BookText },
   { href: "/playbooks", label: "Playbooks", icon: BookOpen },
   { href: "/progress", label: "Progress", icon: ListChecks },
@@ -157,7 +159,9 @@ export function Shell({ children }: { children: React.ReactNode }) {
       {NAV.map(({ href, label, icon }) => (
         <NavLink
           key={href}
-          href={href === "/prop-firms" ? href : filterQuery.size ? `${href}?${filterQuery}` : href}
+          // Campaign reads TMP, not the journal's trades, so the global trade
+          // filters do not apply to it.
+          href={href === "/campaign" ? href : filterQuery.size ? `${href}?${filterQuery}` : href}
           label={label}
           icon={icon}
           collapsed={collapsed}
