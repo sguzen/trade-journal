@@ -11,9 +11,12 @@
  * unchanged for anyone who has not filled them in.
  */
 
+import { useState } from "react";
+
 import { AlertTriangle, ShieldCheck } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
+import { OptionSelect } from "./ui/option-select";
 import { MonetaryValue } from "./privacy";
 import { useApi } from "@/lib/use-api";
 import { propMoney } from "@/lib/prop-firms";
@@ -35,13 +38,47 @@ type CampaignAccount = {
   unrecordedBreach: boolean;
 };
 
+type Preset = { key: string; label: string; source: string; caveats: string[] };
+type Unconfigured = { accountId: string; firm: string; name: string; accountSize: number };
+type CampaignPayload = {
+  accounts: CampaignAccount[];
+  unconfigured: Unconfigured[];
+  presets: Preset[];
+};
+
 /** The tracker stores minor units; this layer already speaks whole currency. */
 const money = (value: number, currency: string) => propMoney(Math.round(value * 100), currency);
 
 export function CampaignRules() {
-  const { data } = useApi<{ accounts: CampaignAccount[] }>("/api/campaign");
+  const { data, refresh } = useApi<CampaignPayload>("/api/campaign");
+  const [busy, setBusy] = useState("");
+  const [error, setError] = useState("");
   const accounts = data?.accounts ?? [];
-  if (accounts.length === 0) return null;
+  const unconfigured = data?.unconfigured ?? [];
+  const presets = data?.presets ?? [];
+  if (accounts.length === 0 && unconfigured.length === 0) return null;
+
+  const apply = async (accountId: string, presetKey: string) => {
+    if (!presetKey) return;
+    setBusy(accountId);
+    setError("");
+    try {
+      const response = await fetch("/api/campaign", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ action: "preset", accountId, presetKey }),
+      });
+      if (!response.ok) {
+        const payload = await response.json().catch(() => ({}));
+        throw new Error(payload.error ?? "Could not apply that preset.");
+      }
+      refresh();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not apply that preset.");
+    } finally {
+      setBusy("");
+    }
+  };
 
   const dead = accounts.filter((a) => a.unrecordedBreach);
 
@@ -69,55 +106,101 @@ export function CampaignRules() {
           </p>
         )}
 
-        <div className="overflow-x-auto">
-          <table className="w-full text-sm">
-            <thead className="text-muted-foreground">
-              <tr className="text-left">
-                <th className="py-1 pr-4 font-medium">Account</th>
-                <th className="py-1 pr-4 font-medium">Stage</th>
-                <th className="py-1 pr-4 text-right font-medium">Balance</th>
-                <th className="py-1 pr-4 text-right font-medium">Floor</th>
-                <th className="py-1 pr-4 text-right font-medium">Left to lose</th>
-                <th className="py-1 pr-4 text-right font-medium">Day one</th>
-              </tr>
-            </thead>
-            <tbody>
-              {accounts.map((a) => (
-                <tr key={a.accountId} className="border-t">
-                  <td className="py-1.5 pr-4">
-                    <span className="font-medium">{a.firm}</span>{" "}
-                    <span className="text-muted-foreground">{a.name}</span>
-                    {a.unrecordedBreach && (
-                      <span className="ml-2 rounded bg-destructive/15 px-1.5 py-0.5 text-xs text-destructive">
-                        breached
-                      </span>
-                    )}
-                  </td>
-                  <td className="py-1.5 pr-4 text-muted-foreground">
-                    {a.stage}
-                    {a.isFlex && a.stage === "funded" ? " · flex" : ""}
-                  </td>
-                  <td className="py-1.5 pr-4 text-right tabular-nums">
-                    <MonetaryValue>{money(a.currentBalance, a.currency)}</MonetaryValue>
-                  </td>
-                  <td className="py-1.5 pr-4 text-right tabular-nums">
-                    <MonetaryValue>{money(a.floor, a.currency)}</MonetaryValue>
-                  </td>
-                  <td
-                    className={`py-1.5 pr-4 text-right tabular-nums ${
-                      a.riskBudget === 0 ? "text-destructive" : ""
-                    }`}
-                  >
-                    <MonetaryValue>{money(a.riskBudget, a.currency)}</MonetaryValue>
-                  </td>
-                  <td className="py-1.5 pr-4 text-right tabular-nums text-muted-foreground">
-                    <MonetaryValue>{money(a.dayOneTarget, a.currency)}</MonetaryValue>
-                  </td>
+        {accounts.length > 0 && (
+          <div className="overflow-x-auto">
+            <table className="w-full text-sm">
+              <thead className="text-muted-foreground">
+                <tr className="text-left">
+                  <th className="py-1 pr-4 font-medium">Account</th>
+                  <th className="py-1 pr-4 font-medium">Stage</th>
+                  <th className="py-1 pr-4 text-right font-medium">Balance</th>
+                  <th className="py-1 pr-4 text-right font-medium">Floor</th>
+                  <th className="py-1 pr-4 text-right font-medium">Left to lose</th>
+                  <th className="py-1 pr-4 text-right font-medium">Day one</th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
-        </div>
+              </thead>
+              <tbody>
+                {accounts.map((a) => (
+                  <tr key={a.accountId} className="border-t">
+                    <td className="py-1.5 pr-4">
+                      <span className="font-medium">{a.firm}</span>{" "}
+                      <span className="text-muted-foreground">{a.name}</span>
+                      {a.unrecordedBreach && (
+                        <span className="ml-2 rounded bg-destructive/15 px-1.5 py-0.5 text-xs text-destructive">
+                          breached
+                        </span>
+                      )}
+                    </td>
+                    <td className="py-1.5 pr-4 text-muted-foreground">
+                      {a.stage}
+                      {a.isFlex && a.stage === "funded" ? " · flex" : ""}
+                    </td>
+                    <td className="py-1.5 pr-4 text-right tabular-nums">
+                      <MonetaryValue>{money(a.currentBalance, a.currency)}</MonetaryValue>
+                    </td>
+                    <td className="py-1.5 pr-4 text-right tabular-nums">
+                      <MonetaryValue>{money(a.floor, a.currency)}</MonetaryValue>
+                    </td>
+                    <td
+                      className={`py-1.5 pr-4 text-right tabular-nums ${
+                        a.riskBudget === 0 ? "text-destructive" : ""
+                      }`}
+                    >
+                      <MonetaryValue>{money(a.riskBudget, a.currency)}</MonetaryValue>
+                    </td>
+                    <td className="py-1.5 pr-4 text-right tabular-nums text-muted-foreground">
+                      <MonetaryValue>{money(a.dayOneTarget, a.currency)}</MonetaryValue>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
+        )}
+
+        {error && (
+          <p className="text-sm text-destructive" role="alert">
+            {error}
+          </p>
+        )}
+
+        {unconfigured.length > 0 && (
+          <div className="space-y-2">
+            <p className="text-sm text-muted-foreground">
+              No rules recorded yet for{" "}
+              {unconfigured.length === 1 ? "one account" : `${unconfigured.length} accounts`}. Pick
+              the plan it was bought under — the terms are copied onto the account, so editing a
+              preset later never rewrites them.
+            </p>
+            {unconfigured.map((a) => (
+              <div key={a.accountId} className="flex flex-wrap items-center gap-2 text-sm">
+                <span className="min-w-48">
+                  <span className="font-medium">{a.firm}</span>{" "}
+                  <span className="text-muted-foreground">{a.name}</span>
+                </span>
+                <OptionSelect
+                  className="w-64"
+                  value=""
+                  disabled={busy === a.accountId}
+                  onValueChange={(key) => apply(a.accountId, key)}
+                  aria-label={`Plan for ${a.firm} ${a.name}`}
+                >
+                  <option value="">Choose a plan…</option>
+                  {presets.map((p) => (
+                    <option key={p.key} value={p.key}>
+                      {p.label}
+                      {p.caveats.length > 0 ? " ⚠" : ""}
+                    </option>
+                  ))}
+                </OptionSelect>
+              </div>
+            ))}
+            <p className="text-xs text-muted-foreground">
+              ⚠ marks a plan with terms that were inferred rather than read from the firm. Check
+              those before trusting the floor.
+            </p>
+          </div>
+        )}
 
         <p className="text-xs text-muted-foreground">
           Day one is the profit the first qualifying day must carry so the rest only need to clear

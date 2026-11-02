@@ -18,6 +18,8 @@ import { eq } from "drizzle-orm";
 import {
   type AccountSnapshot,
   DEFAULT_RULES,
+  FIRM_PRESETS,
+  presetByKey,
   type DrawdownType,
   type FirmRuleSet,
   type Stage,
@@ -30,6 +32,8 @@ import {
 } from "@desk/campaign";
 
 import { db, propAccountRules, propAccounts } from "@/db";
+import { requireValue } from "./api";
+import { nowIso } from "./ids";
 import { currencyDigits, type PropAccount } from "@/lib/prop-firms";
 
 type RulesRow = typeof propAccountRules.$inferSelect;
@@ -150,22 +154,159 @@ export function assess(account: PropAccount, row: RulesRow): CampaignAccount {
   };
 }
 
-/** Every account that has rules recorded, assessed. Accounts without rules are absent. */
-export function campaignData(): { accounts: CampaignAccount[] } {
-  const rows = db.select().from(propAccountRules).all();
-  if (rows.length === 0) return { accounts: [] };
+export type UnconfiguredAccount = {
+  accountId: string;
+  firm: string;
+  name: string;
+  /** Whole currency; the preset's own size is ignored in favour of this. */
+  accountSize: number;
+};
 
-  const byId = new Map(
-    (db.select().from(propAccounts).all() as PropAccount[]).map((a) => [a.id, a]),
-  );
+export type CampaignData = {
+  accounts: CampaignAccount[];
+  /** Live accounts with no rules recorded, so the UI can offer a preset. */
+  unconfigured: UnconfiguredAccount[];
+  presets: { key: string; label: string; source: string; caveats: string[] }[];
+};
+
+/**
+ * Every account that has rules recorded, assessed — plus the ones that do not,
+ * so the screen can offer a way in rather than staying empty forever.
+ */
+export function campaignData(): CampaignData {
+  const rows = db.select().from(propAccountRules).all();
+  const configured = new Map(rows.map((r) => [r.accountId, r]));
+  const all = db.select().from(propAccounts).all() as PropAccount[];
+
   const assessed: CampaignAccount[] = [];
-  for (const row of rows) {
-    const account = byId.get(row.accountId);
-    // A rules row whose account was deleted outlives nothing useful; the
-    // cascade should have taken it, so skip rather than invent an account.
-    if (account) assessed.push(assess(account, row));
+  const unconfigured: UnconfiguredAccount[] = [];
+  for (const account of all) {
+    if (account.archived) continue;
+    const row = configured.get(account.id);
+    if (row) {
+      assessed.push(assess(account, row));
+    } else {
+      unconfigured.push({
+        accountId: account.id,
+        firm: account.firm,
+        name: account.name,
+        accountSize: majorOr(account.sizeMinor, account.currency),
+      });
+    }
   }
-  return { accounts: assessed };
+
+  return {
+    accounts: assessed,
+    unconfigured,
+    presets: FIRM_PRESETS.map((p) => ({
+      key: p.key,
+      label: `${p.rules.firmName} ${p.rules.planName}`,
+      source: p.source,
+      caveats: p.caveats,
+    })),
+  };
+}
+
+const minor = (value: number, currency: string): number =>
+  Math.round(value * 10 ** currencyDigits(currency));
+
+const minorOrNull = (value: number | null, currency: string): number | null =>
+  value === null ? null : minor(value, currency);
+
+/**
+ * Copy a preset's rules onto an account.
+ *
+ * From here the account owns them. A later edit to the preset must never reach
+ * back and rewrite the terms an account was bought under, which is why this
+ * writes values rather than storing the preset key.
+ *
+ * The account's own size wins over the preset's: the tracker knows what was
+ * actually bought, and a 25k preset applied to a 50k account should keep the
+ * 50k balances.
+ */
+export function applyPreset(accountId: string, presetKey: string): RulesRow {
+  const account = (db.select().from(propAccounts).all() as PropAccount[]).find(
+    (a) => a.id === accountId,
+  );
+  requireValue(account, "Choose an account that exists.");
+  const found = presetByKey(presetKey);
+  requireValue(found, "Choose a preset that exists.");
+  const preset = found as NonNullable<typeof found>;
+  const chosen = account as PropAccount;
+
+  const c = chosen.currency;
+  const r = preset.rules;
+  const size = chosen.sizeMinor ?? minor(r.accountSize, c);
+  const now = nowIso();
+  const row = {
+    accountId,
+    payoutProfitTargetMinor: minor(r.payoutProfitTarget, c),
+    minProfitableDays: r.minProfitableDays,
+    minDailyProfitMinor: minor(r.minDailyProfit, c),
+    payoutSplitBps: Math.round(r.payoutSplitPct * 100),
+    evalProfitTargetMinor: minor(r.evalProfitTarget, c),
+    consistencyPctEval: r.consistencyPctEval,
+    consistencyPctFunded: r.consistencyPctFunded,
+    dailyLossLimitMinor: minorOrNull(r.dailyLossLimit, c),
+    drawdownMinor: minor(r.drawdownAmount, c),
+    drawdownType: r.drawdownType,
+    trailStopsAtProfitMinor: minorOrNull(r.trailStopsAtProfit, c),
+    fundedDrawdownMinor: minorOrNull(r.fundedDrawdownAmount, c),
+    fundedDrawdownType: r.fundedDrawdownType,
+    payoutCapMinor: minor(r.payoutCap, c),
+    payoutBufferMinor: minor(r.payoutBuffer, c),
+    payoutDailyCapMinor: minor(r.payoutDailyCap, c),
+    payoutMinMinor: minor(r.payoutMin, c),
+    maxPayouts: r.maxPayouts,
+    // Balances start at the account's size; the trader corrects them as the
+    // account trades. Guessing a peak would invent a floor.
+    startingBalanceMinor: size,
+    currentBalanceMinor: size,
+    peakBalanceMinor: size,
+    createdAt: now,
+    updatedAt: now,
+  };
+
+  db.insert(propAccountRules)
+    .values(row)
+    .onConflictDoUpdate({
+      target: propAccountRules.accountId,
+      // createdAt is deliberately absent: re-applying a preset replaces the
+      // terms, it does not make the record new.
+      set: { ...row, createdAt: undefined, updatedAt: now },
+    })
+    .run();
+  return row as RulesRow;
+}
+
+/** Correct the balances the floor is computed from. */
+export function setBalances(
+  accountId: string,
+  balances: { current?: number; peak?: number; starting?: number },
+): RulesRow {
+  const existing = rulesFor(accountId);
+  requireValue(existing, "Record this account's rules before setting its balances.");
+  const account = (db.select().from(propAccounts).all() as PropAccount[]).find(
+    (a) => a.id === accountId,
+  );
+  requireValue(account, "Choose an account that exists.");
+  const c = (account as PropAccount).currency;
+  const row = existing as RulesRow;
+
+  const next = {
+    startingBalanceMinor:
+      balances.starting === undefined ? row.startingBalanceMinor : minor(balances.starting, c),
+    currentBalanceMinor:
+      balances.current === undefined ? row.currentBalanceMinor : minor(balances.current, c),
+    peakBalanceMinor: balances.peak === undefined ? row.peakBalanceMinor : minor(balances.peak, c),
+    updatedAt: nowIso(),
+  };
+  // The peak cannot be below the balance it is supposed to be the peak of;
+  // allowing it would put the trailing floor above the account's own high.
+  next.peakBalanceMinor = Math.max(next.peakBalanceMinor, next.currentBalanceMinor);
+
+  db.update(propAccountRules).set(next).where(eq(propAccountRules.accountId, accountId)).run();
+  return { ...row, ...next };
 }
 
 export function rulesFor(accountId: string): RulesRow | null {

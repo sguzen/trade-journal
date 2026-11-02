@@ -20,7 +20,12 @@ process.env.JOURNAL_DATA_DIR = scratch;
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => undefined }) }));
 
 const { db, propAccounts, propAccountRules } = await import("../src/db");
-const { campaignData, rulesFromRow, stageOf } = await import("../src/server/campaign");
+const { campaignData, rulesFromRow, stageOf, applyPreset, setBalances } = await import(
+  "../src/server/campaign",
+);
+const { rulesFor } = await import("../src/server/campaign");
+const applyPresetSync = applyPreset;
+const setBalancesSync = setBalances;
 
 afterAll(() => {
   process.env.JOURNAL_DATA_DIR = originalDir;
@@ -187,5 +192,69 @@ describe("assessment", () => {
     expect(assessed.dayOneTarget).toBe(1_900); // 2,500 − 4 × 150
     expect(assessed.evalMinDays).toBe(2); // a 50% consistency rule needs two days
     expect(assessed.isFlex).toBe(true);
+  });
+});
+
+describe("applying a preset", () => {
+  it("copies the plan's terms onto the account", () => {
+    const account = addAccount({ program: "funded", sizeMinor: 5_000_000 });
+    applyPresetSync(account.id, "fundednext-flex-50k");
+
+    const assessed = only(campaignData().accounts);
+    // Flex 50k: 2,100 target over 5 days at 200 → 1,300 on day one.
+    expect(assessed.dayOneTarget).toBe(1_300);
+    // Balances start at the account's size, so the peak has not yet dragged
+    // the floor up to the +100 lock: it is still peak − 1,500.
+    expect(assessed.floor).toBe(48_500);
+    expect(assessed.currentBalance).toBe(50_000);
+  });
+
+  it("keeps the account's own size over the preset's", () => {
+    // A 25k plan applied to an account the tracker says is 50k keeps 50k:
+    // the tracker knows what was actually bought.
+    const account = addAccount({ sizeMinor: 5_000_000 });
+    applyPresetSync(account.id, "lucid-flex-25k");
+    const assessed = only(campaignData().accounts);
+    expect(assessed.currentBalance).toBe(50_000);
+  });
+
+  it("replaces the terms when a different preset is applied", () => {
+    const account = addAccount();
+    applyPresetSync(account.id, "lucid-flex-25k");
+    applyPresetSync(account.id, "topstep-50k-combine");
+    const assessed = only(campaignData().accounts);
+    // Topstep's drawdown is 2,000 against Lucid's 1,000, so the floor moved.
+    expect(assessed.floor).toBe(48_000);
+  });
+
+  it("refuses an unknown preset or account", () => {
+    const account = addAccount();
+    expect(() => applyPresetSync(account.id, "nope")).toThrow();
+    expect(() => applyPresetSync("ghost", "lucid-flex-25k")).toThrow();
+  });
+
+  it("lists accounts with no rules so the screen can offer one", () => {
+    addAccount({ id: "bare", firm: "Topstep", name: "50k" });
+    const data = campaignData();
+    expect(data.accounts).toEqual([]);
+    expect(data.unconfigured.map((a) => a.accountId)).toEqual(["bare"]);
+    expect(data.presets.length).toBeGreaterThan(5);
+  });
+});
+
+describe("balances", () => {
+  it("never lets the peak fall below the current balance", () => {
+    // A trailing floor derived from a peak below the balance would sit above
+    // the account's own high.
+    const account = addAccount();
+    applyPresetSync(account.id, "blue-guardian-reserve-50k");
+    setBalancesSync(account.id, { current: 53_000, peak: 51_000 });
+    const stored = rulesFor(account.id)!;
+    expect(stored.peakBalanceMinor).toBe(stored.currentBalanceMinor);
+  });
+
+  it("refuses balances for an account with no rules", () => {
+    const account = addAccount();
+    expect(() => setBalancesSync(account.id, { current: 1 })).toThrow();
   });
 });
