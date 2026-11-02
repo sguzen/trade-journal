@@ -19,7 +19,8 @@ const scratch = mkdtempSync(join(tmpdir(), "journal-campaign-test-"));
 process.env.JOURNAL_DATA_DIR = scratch;
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => undefined }) }));
 
-const { db, propAccounts, propAccountRules } = await import("../src/db");
+const { eq } = await import("drizzle-orm");
+const { db, propAccounts, propAccountRules, accounts, trades } = await import("../src/db");
 const { campaignData, rulesFromRow, stageOf, applyPreset, setBalances } = await import(
   "../src/server/campaign",
 );
@@ -102,6 +103,8 @@ function addRules(accountId: string, over: Record<string, unknown> = {}) {
 beforeEach(() => {
   db.delete(propAccountRules).run();
   db.delete(propAccounts).run();
+  db.delete(trades).run();
+  db.delete(accounts).run();
 });
 
 describe("stage", () => {
@@ -256,5 +259,112 @@ describe("balances", () => {
   it("refuses balances for an account with no rules", () => {
     const account = addAccount();
     expect(() => setBalancesSync(account.id, { current: 1 })).toThrow();
+  });
+});
+
+describe("balances derived from the journal", () => {
+  const addJournalAccount = (id = "j1") => {
+    db.insert(accounts)
+      .values({ id, name: "NQ", broker: "manual", kind: "manual", currency: "USD", createdAt: NOW })
+      .run();
+    return id;
+  };
+
+  const addTrade = (accountId: string, key: string, closedAt: string, netPnl: number) => {
+    db.insert(trades)
+      .values({
+        key,
+        accountId,
+        symbol: "NQ",
+        direction: "long",
+        status: netPnl >= 0 ? "win" : "loss",
+        openedAt: closedAt,
+        closedAt,
+        quantity: 1,
+        openQuantity: 0,
+        avgEntry: 100,
+        avgExit: 100 + netPnl,
+        grossPnl: netPnl,
+        fees: 0,
+        netPnl,
+        executionCount: 2,
+        executionIdsJson: "[]",
+        exitsJson: "[]",
+      })
+      .run();
+  };
+
+  it("uses the journal over a stale typed-in balance", () => {
+    // The whole reason for deriving: a number typed in a week ago is wrong the
+    // moment the next trade closes.
+    const journalId = addJournalAccount();
+    const account = addAccount({ journalAccountId: journalId });
+    applyPresetSync(account.id, "blue-guardian-reserve-50k");
+    setBalancesSync(account.id, { current: 50_000, peak: 50_000 });
+
+    addTrade(journalId, "t1", "2026-10-20T15:00:00.000Z", 900);
+    addTrade(journalId, "t2", "2026-10-21T15:00:00.000Z", -400);
+
+    const assessed = only(campaignData().accounts);
+    expect(assessed.balanceSource).toBe("journal");
+    expect(assessed.tradeCount).toBe(2);
+    expect(assessed.currentBalance).toBe(50_500);
+    // EOD peak is day one's close at 50,900, so the floor trails from there:
+    // 50,900 − 2,000 = 48,900, still below the +100 lock, which only caps.
+    expect(assessed.floor).toBe(48_900);
+  });
+
+  it("keeps the manual balances when no journal is linked", () => {
+    const account = addAccount({ journalAccountId: null });
+    applyPresetSync(account.id, "blue-guardian-reserve-50k");
+    setBalancesSync(account.id, { current: 51_000, peak: 51_000 });
+    const assessed = only(campaignData().accounts);
+    expect(assessed.balanceSource).toBe("manual");
+    expect(assessed.currentBalance).toBe(51_000);
+  });
+
+  it("trails the day close, not the high-water mark inside the day", () => {
+    // Two trades on the SAME day: +900 then −400. An end-of-day trailing floor
+    // trails the 50,500 close, not the 50,900 the account touched between them.
+    const journalId = addJournalAccount("j2");
+    const account = addAccount({ journalAccountId: journalId });
+    applyPresetSync(account.id, "blue-guardian-reserve-50k");
+    addTrade(journalId, "t1", "2026-10-20T14:00:00.000Z", 900);
+    addTrade(journalId, "t2", "2026-10-20T16:00:00.000Z", -400);
+
+    const assessed = only(campaignData().accounts);
+    expect(assessed.currentBalance).toBe(50_500);
+    // Day close 50,500 − 2,000 = 48,500, below the +100 lock, so 48,500 stands.
+    expect(assessed.floor).toBe(48_500);
+    expect(assessed.peakIsLowerBound).toBe(false);
+  });
+
+  it("admits uncertainty on an intraday-trailing plan", () => {
+    const journalId = addJournalAccount("j3");
+    const account = addAccount({ journalAccountId: journalId });
+    applyPresetSync(account.id, "blue-guardian-reserve-50k");
+    // Switch the funded stage to intraday trailing, as TPT PRO does.
+    db.update(propAccountRules)
+      .set({ fundedDrawdownMinor: 100_000, fundedDrawdownType: "trailing" })
+      .where(eq(propAccountRules.accountId, account.id))
+      .run();
+    addTrade(journalId, "t1", "2026-10-20T14:00:00.000Z", 900);
+    addTrade(journalId, "t2", "2026-10-20T16:00:00.000Z", -400);
+
+    const assessed = only(campaignData().accounts);
+    expect(assessed.peakIsLowerBound).toBe(true);
+    // Trade peak 50,900 − 1,000 = 49,900. The intraday peak is 400 higher
+    // than the day close, so this floor sits above the EOD one (48,900).
+    expect(assessed.floor).toBe(49_900);
+  });
+
+  it("reads an untraded linked account as flat, not as missing", () => {
+    const journalId = addJournalAccount("j4");
+    const account = addAccount({ journalAccountId: journalId });
+    applyPresetSync(account.id, "blue-guardian-reserve-50k");
+    const assessed = only(campaignData().accounts);
+    expect(assessed.balanceSource).toBe("journal");
+    expect(assessed.tradeCount).toBe(0);
+    expect(assessed.currentBalance).toBe(50_000);
   });
 });

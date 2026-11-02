@@ -18,7 +18,10 @@ import { eq } from "drizzle-orm";
 import {
   type AccountSnapshot,
   DEFAULT_RULES,
+  type DerivedBalances,
   FIRM_PRESETS,
+  deriveBalances,
+  peakFor,
   presetByKey,
   type DrawdownType,
   type FirmRuleSet,
@@ -31,9 +34,13 @@ import {
   shouldBreach,
 } from "@desk/campaign";
 
+import { dailyCumulative, equityCurve } from "@luxalgo/journal-core";
+
 import { db, propAccountRules, propAccounts } from "@/db";
 import { requireValue } from "./api";
 import { nowIso } from "./ids";
+import { getTimeZone } from "./settings";
+import { queryTrades } from "./trades-query";
 import { currencyDigits, type PropAccount } from "@/lib/prop-firms";
 
 type RulesRow = typeof propAccountRules.$inferSelect;
@@ -109,6 +116,26 @@ export function snapshotFromRow(row: RulesRow, account: PropAccount): AccountSna
   };
 }
 
+/**
+ * What the journal says this account's balances are.
+ *
+ * Only closed round trips count. An open position has not moved the balance a
+ * firm would act on, and its excursion is exactly what a journal of round
+ * trips cannot see.
+ */
+export function derivedFor(account: PropAccount, row: RulesRow): DerivedBalances | null {
+  if (!account.journalAccountId) return null;
+  const { trades } = queryTrades({ accountIds: [account.journalAccountId] });
+  const timeZone = getTimeZone();
+  const dayCloseCum = dailyCumulative(trades, timeZone).map((point) => point.cumNetPnl);
+  const tradeCloseCum = equityCurve(trades).map((point) => point.cumNetPnl);
+  return deriveBalances(
+    majorOr(row.startingBalanceMinor, account.currency),
+    dayCloseCum,
+    tradeCloseCum,
+  );
+}
+
 export type CampaignAccount = {
   accountId: string;
   firm: string;
@@ -130,11 +157,32 @@ export type CampaignAccount = {
   breached: boolean;
   /** The account is breached but the tracker has not been told. */
   unrecordedBreach: boolean;
+  /** Where the balances came from. Typed-in figures go stale; derived ones do not. */
+  balanceSource: "journal" | "manual";
+  /** Closed round trips behind a derived balance. */
+  tradeCount: number;
+  /**
+   * The peak is a lower bound, so the floor may sit lower than the firm's.
+   * True only for intraday-trailing plans, whose real peak lives inside trades
+   * the journal does not record.
+   */
+  peakIsLowerBound: boolean;
 };
 
 export function assess(account: PropAccount, row: RulesRow): CampaignAccount {
   const rules = rulesFromRow(row, account);
-  const snapshot = snapshotFromRow(row, account);
+  const stored = snapshotFromRow(row, account);
+  const derived = derivedFor(account, row);
+
+  // A linked journal is the better record: it cannot go stale the way a typed
+  // balance does. Manual figures stay in use for accounts with no journal.
+  const { peak, peakIsLowerBound } = derived
+    ? peakFor(derived, rules, stored.stage)
+    : { peak: stored.peakBalance, peakIsLowerBound: false };
+  const snapshot: AccountSnapshot = derived
+    ? { ...stored, currentBalance: derived.current, peakBalance: peak }
+    : stored;
+
   const breached = shouldBreach(snapshot, rules);
   return {
     accountId: account.id,
@@ -146,6 +194,9 @@ export function assess(account: PropAccount, row: RulesRow): CampaignAccount {
     floor: drawdownFloor(snapshot, rules),
     riskBudget: riskBudget(snapshot, rules),
     currentBalance: snapshot.currentBalance,
+    balanceSource: derived ? "journal" : "manual",
+    tradeCount: derived?.tradeCount ?? 0,
+    peakIsLowerBound,
     dayOneTarget: dayOneTarget(rules),
     evalMinDays: evalMinDays(rules),
     isFlex: isFlex(rules),

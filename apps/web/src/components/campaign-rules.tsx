@@ -36,6 +36,9 @@ type CampaignAccount = {
   isFlex: boolean;
   breached: boolean;
   unrecordedBreach: boolean;
+  balanceSource: "journal" | "manual";
+  tradeCount: number;
+  peakIsLowerBound: boolean;
 };
 
 type Preset = { key: string; label: string; source: string; caveats: string[] };
@@ -137,9 +140,27 @@ export function CampaignRules() {
                     </td>
                     <td className="py-1.5 pr-4 text-right tabular-nums">
                       <MonetaryValue>{money(a.currentBalance, a.currency)}</MonetaryValue>
+                      <span
+                        className="ml-1 text-xs text-muted-foreground"
+                        title={
+                          a.balanceSource === "journal"
+                            ? `Derived from ${a.tradeCount} closed trades in the linked journal.`
+                            : "Typed in. No journal account is linked, so this does not move on its own."
+                        }
+                      >
+                        {a.balanceSource === "journal" ? `${a.tradeCount}t` : "typed"}
+                      </span>
                     </td>
                     <td className="py-1.5 pr-4 text-right tabular-nums">
                       <MonetaryValue>{money(a.floor, a.currency)}</MonetaryValue>
+                      {a.peakIsLowerBound && (
+                        <span
+                          className="ml-1 text-xs text-muted-foreground"
+                          title="This plan trails equity reached inside a trade, which closed round trips do not record. The real floor is at least this high."
+                        >
+                          ≥
+                        </span>
+                      )}
                     </td>
                     <td
                       className={`py-1.5 pr-4 text-right tabular-nums ${
@@ -200,6 +221,14 @@ export function CampaignRules() {
               those before trusting the floor.
             </p>
           </div>
+        )}
+
+        {accounts.some((a) => a.peakIsLowerBound) && (
+          <p className="text-xs text-muted-foreground">
+            ≥ marks a floor computed from a peak the journal can only bound from below. Those plans
+            trail equity reached inside a trade, and closed round trips do not record it — so the
+            real floor is at least this high, and the room left is at most what is shown.
+          </p>
         )}
 
         <p className="text-xs text-muted-foreground">
