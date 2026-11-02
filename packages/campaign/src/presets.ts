@@ -210,6 +210,42 @@ export const FIRM_PRESETS: FirmPreset[] = [
     ],
   ),
   preset(
+    "tpt-pro-50k",
+    "Take Profit Trader, trader-confirmed 2026-08-04 and 2026-11-02",
+    {
+      firmName: "Take Profit Trader",
+      planName: "PRO 50k",
+      accountSize: 50_000,
+      // PRO has no qualifying-day rule. The gate is the buffer: $2,000 must
+      // be built and left in before anything can be withdrawn, after which
+      // payouts are daily.
+      payoutProfitTarget: 2_000,
+      minProfitableDays: 0,
+      minDailyProfit: 0,
+      payoutSplitPct: 80,
+      payoutCap: 0,
+      payoutBuffer: 2_000,
+      evalProfitTarget: 3_000,
+      consistencyPctEval: 50,
+      // The Test runs end-of-day trailing on $2,000; PRO keeps the $2,000 but
+      // switches to INTRADAY trailing. That switch is the trap this whole
+      // package exists for: an account scored on the Test's terms reads as
+      // alive long after the firm has closed it.
+      drawdownAmount: 2_000,
+      drawdownType: DrawdownType.TRAILING_EOD,
+      fundedDrawdownAmount: 2_000,
+      fundedDrawdownType: DrawdownType.TRAILING_INTRADAY,
+      trailStopsAtProfit: 100,
+      // The account ends on cumulative withdrawals, not on a payout count.
+      maxPayouts: 0,
+    },
+    [
+      "The account concludes at $10,000 withdrawn in total and moves to live. That is a cumulative-dollar cap, which these rules cannot express — they count payouts, not their sum. Watch it yourself.",
+      "Payouts inside the first 60 days are cut to 50% of profits. Not modelled.",
+      "Split is 80% on PRO and 90% at PRO+. The lower figure is modelled.",
+    ],
+  ),
+  preset(
     "goat-flex-50k",
     "goatfundedtrader.com, read 2026-08-04",
     {

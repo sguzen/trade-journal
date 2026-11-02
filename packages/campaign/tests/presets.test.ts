@@ -6,7 +6,14 @@
 
 import { describe, expect, it } from "vitest";
 
-import { FIRM_PRESETS, dayOneTarget, drawdownFloor, presetByKey } from "../src";
+import {
+  DrawdownType,
+  FIRM_PRESETS,
+  dayOneTarget,
+  drawdownFloor,
+  fundedDrawdown,
+  presetByKey,
+} from "../src";
 
 describe("the preset catalogue", () => {
   it("has unique keys", () => {
@@ -74,5 +81,48 @@ describe("the values that are easy to get wrong", () => {
     expect(flagged).toContain("goat-flex-50k");
     expect(flagged).toContain("ffn-steady-50k");
     expect(flagged).toContain("blue-guardian-express-50k");
+  });
+});
+
+describe("Take Profit Trader PRO — the stage switch", () => {
+  const tpt = () => presetByKey("tpt-pro-50k")!;
+
+  it("changes drawdown TYPE between the Test and PRO, not the amount", () => {
+    const r = tpt().rules;
+    expect(r.drawdownAmount).toBe(2_000);
+    expect(r.drawdownType).toBe(DrawdownType.TRAILING_EOD);
+    expect(fundedDrawdown(r)).toEqual({
+      amount: 2_000,
+      type: DrawdownType.TRAILING_INTRADAY,
+    });
+  });
+
+  it("is the reason a funded account must not be scored on the eval's terms", () => {
+    // Same account, same peak. Only the stage differs — and with an intraday
+    // trail the floor follows equity the day close never showed.
+    const r = tpt().rules;
+    const at = (stage: "eval" | "funded", peakBalance: number) =>
+      drawdownFloor(
+        { startingBalance: 50_000, currentBalance: 50_400, peakBalance, stage, isTerminal: false },
+        r,
+      );
+    // The day closed at 50,400 but the position ran to 51,800 intraday.
+    expect(at("eval", 50_400)).toBe(48_400);
+    expect(at("funded", 51_800)).toBe(49_800);
+  });
+
+  it("gates on the buffer rather than on qualifying days", () => {
+    const r = tpt().rules;
+    expect(r.minProfitableDays).toBe(0);
+    expect(r.payoutBuffer).toBe(2_000);
+    // With no qualifying days, day one carries the whole buffer gate.
+    expect(dayOneTarget(r)).toBe(2_000);
+  });
+
+  it("says plainly that the $10,000 conclusion is not modelled", () => {
+    // The rules count payouts, not their sum, so the cap that actually ends
+    // this account cannot be expressed. Silence there would be a trap.
+    expect(tpt().rules.maxPayouts).toBe(0);
+    expect(tpt().caveats.join(" ")).toContain("$10,000");
   });
 });
