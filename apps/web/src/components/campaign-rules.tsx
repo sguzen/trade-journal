@@ -60,11 +60,24 @@ export function CampaignRules() {
   const { data, refresh } = useApi<CampaignPayload>("/api/campaign");
   const [busy, setBusy] = useState("");
   const [editing, setEditing] = useState("");
+  const [showFinished, setShowFinished] = useState(false);
   const [error, setError] = useState("");
-  const accounts = data?.accounts ?? [];
+  const all = data?.accounts ?? [];
+  // A finished account has no floor worth watching. Keeping it in the same
+  // list buries the two accounts that are actually at risk under a history
+  // of every account ever bought.
+  const finished = all.filter((a) => a.status === "breached" || a.status === "closed");
+  const live = all
+    .filter((a) => a.status !== "breached" && a.status !== "closed")
+    // Least room first: the account about to die is the one worth seeing.
+    .sort(
+      (x, y) =>
+        Number(y.unrecordedBreach) - Number(x.unrecordedBreach) || x.riskBudget - y.riskBudget,
+    );
+  const accounts = showFinished ? [...live, ...finished] : live;
   const unconfigured = data?.unconfigured ?? [];
   const presets = data?.presets ?? [];
-  if (accounts.length === 0 && unconfigured.length === 0) return null;
+  if (all.length === 0 && unconfigured.length === 0) return null;
 
   const apply = async (accountId: string, presetKey: string) => {
     if (!presetKey) return;
@@ -99,6 +112,32 @@ export function CampaignRules() {
         </CardTitle>
       </CardHeader>
       <CardContent className="space-y-4">
+        {live.length > 0 && (
+          <div className="flex flex-wrap gap-x-6 gap-y-1 text-sm">
+            <span>
+              <span className="font-medium">{live.length}</span>{" "}
+              <span className="text-muted-foreground">live</span>
+            </span>
+            <span>
+              <span className="text-muted-foreground">at risk of breach</span>{" "}
+              <span className={dead.length ? "font-medium text-destructive" : "font-medium"}>
+                {dead.length}
+              </span>
+            </span>
+            <span>
+              <span className="text-muted-foreground">total left to lose</span>{" "}
+              <span className="font-medium tabular-nums">
+                <MonetaryValue>
+                  {money(
+                    live.reduce((sum, a) => sum + a.riskBudget, 0),
+                    live[0]!.currency,
+                  )}
+                </MonetaryValue>
+              </span>
+            </span>
+          </div>
+        )}
+
         {dead.length > 0 && (
           <p
             className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm"
@@ -130,7 +169,14 @@ export function CampaignRules() {
               </thead>
               <tbody>
                 {accounts.map((a) => (
-                  <tr key={a.accountId} className="border-t">
+                  <tr
+                    key={a.accountId}
+                    className={`border-t ${
+                      a.status === "breached" || a.status === "closed"
+                        ? "text-muted-foreground"
+                        : ""
+                    }`}
+                  >
                     <td className="py-1.5 pr-4">
                       <span className="font-medium">{a.firm}</span>{" "}
                       <span className="text-muted-foreground">{a.name}</span>
@@ -249,6 +295,18 @@ export function CampaignRules() {
               those before trusting the floor.
             </p>
           </div>
+        )}
+
+        {finished.length > 0 && (
+          <button
+            type="button"
+            className="text-xs text-muted-foreground underline underline-offset-2"
+            onClick={() => setShowFinished((v) => !v)}
+          >
+            {showFinished
+              ? `hide ${finished.length} finished`
+              : `${finished.length} finished account${finished.length > 1 ? "s" : ""} hidden`}
+          </button>
         )}
 
         {editing &&
