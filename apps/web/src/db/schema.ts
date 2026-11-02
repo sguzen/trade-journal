@@ -392,6 +392,8 @@ export const propAccountRules = sqliteTable("prop_account_rules", {
   payoutDailyCapMinor: integer("payout_daily_cap_minor").notNull().default(0),
   payoutMinMinor: integer("payout_min_minor").notNull().default(0),
   maxPayouts: integer("max_payouts").notNull().default(5),
+  /** Total withdrawals that conclude the account. 0 = no such cap. */
+  payoutLifetimeCapMinor: integer("payout_lifetime_cap_minor").notNull().default(0),
 
   /** Balances the floor is computed from, in minor units of the account currency. */
   startingBalanceMinor: integer("starting_balance_minor").notNull().default(0),

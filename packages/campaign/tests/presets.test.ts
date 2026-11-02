@@ -9,6 +9,7 @@ import { describe, expect, it } from "vitest";
 import {
   DrawdownType,
   FIRM_PRESETS,
+  capStatus,
   dayOneTarget,
   drawdownFloor,
   fundedDrawdown,
@@ -124,5 +125,34 @@ describe("Take Profit Trader PRO — the stage switch", () => {
     // this account cannot be expressed. Silence there would be a trap.
     expect(tpt().rules.maxPayouts).toBe(0);
     expect(tpt().caveats.join(" ")).toContain("$10,000");
+  });
+});
+
+describe("the cumulative withdrawal cap", () => {
+  it("ends TPT PRO on money withdrawn, not on payouts taken", () => {
+    const r = presetByKey("tpt-pro-50k")!.rules;
+    expect(r.payoutLifetimeCap).toBe(10_000);
+    // Counting events would say nothing: the cap is the same whether it took
+    // one payout or twelve.
+    expect(r.maxPayouts).toBe(0);
+    expect(capStatus(4_200, r)).toEqual({
+      cap: 10_000,
+      withdrawn: 4_200,
+      remaining: 5_800,
+      reached: false,
+    });
+    expect(capStatus(10_000, r).reached).toBe(true);
+    expect(capStatus(11_500, r)).toMatchObject({ remaining: 0, reached: true });
+  });
+
+  it("stays silent for plans with no such cap", () => {
+    const r = presetByKey("fundednext-flex-50k")!.rules;
+    expect(r.payoutLifetimeCap).toBe(0);
+    expect(capStatus(50_000, r)).toEqual({
+      cap: 0,
+      withdrawn: 50_000,
+      remaining: 0,
+      reached: false,
+    });
   });
 });

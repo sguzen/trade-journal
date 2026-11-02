@@ -80,6 +80,15 @@ export interface FirmRuleSet {
 
   /** The firm closes the account after this many payouts. 0 = never. */
   maxPayouts: number;
+  /**
+   * Total withdrawals after which the account concludes, in whole currency.
+   * 0 = no such cap.
+   *
+   * Distinct from `maxPayouts`: this counts money, not events. Take Profit
+   * Trader's PRO ends at $10,000 withdrawn however many payouts that took —
+   * one day or three months.
+   */
+  payoutLifetimeCap: number;
 }
 
 /** The moving parts of a live account that the rules are applied to. */
@@ -119,4 +128,5 @@ export const DEFAULT_RULES: Omit<
   payoutMin: 0,
   // Every firm traded so far ends a funded account at the 5th payout.
   maxPayouts: 5,
+  payoutLifetimeCap: 0,
 };

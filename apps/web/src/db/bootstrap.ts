@@ -187,7 +187,7 @@ CREATE TABLE IF NOT EXISTS prop_account_rules (
  trail_stops_at_profit_minor INTEGER, funded_drawdown_minor INTEGER, funded_drawdown_type TEXT,
  payout_cap_minor INTEGER NOT NULL DEFAULT 0, payout_buffer_minor INTEGER NOT NULL DEFAULT 0,
  payout_daily_cap_minor INTEGER NOT NULL DEFAULT 0, payout_min_minor INTEGER NOT NULL DEFAULT 0,
- max_payouts INTEGER NOT NULL DEFAULT 5,
+ max_payouts INTEGER NOT NULL DEFAULT 5, payout_lifetime_cap_minor INTEGER NOT NULL DEFAULT 0,
  starting_balance_minor INTEGER NOT NULL DEFAULT 0, current_balance_minor INTEGER NOT NULL DEFAULT 0,
  peak_balance_minor INTEGER NOT NULL DEFAULT 0,
  created_at TEXT NOT NULL, updated_at TEXT NOT NULL

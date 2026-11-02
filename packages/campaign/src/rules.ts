@@ -105,3 +105,32 @@ export function shouldBreach(account: AccountSnapshot, rules: FirmRuleSet): bool
   if (account.isTerminal) return false;
   return account.currentBalance <= drawdownFloor(account, rules);
 }
+
+export interface CapStatus {
+  /** 0 when the plan has no cumulative cap. */
+  cap: number;
+  withdrawn: number;
+  /** What is left before the account concludes. 0 once reached. */
+  remaining: number;
+  /** The firm would have concluded this account by now. */
+  reached: boolean;
+}
+
+/**
+ * Progress toward a cumulative withdrawal cap.
+ *
+ * Counting payouts cannot answer this: the cap is money, and the same $10,000
+ * may arrive in one payout or in twelve. An account can therefore be finished
+ * while still looking alive on every other measure, which is why it is worth
+ * showing next to the floor rather than left to memory.
+ */
+export function capStatus(withdrawn: number, rules: FirmRuleSet): CapStatus {
+  const cap = rules.payoutLifetimeCap;
+  if (cap <= 0) return { cap: 0, withdrawn, remaining: 0, reached: false };
+  return {
+    cap,
+    withdrawn,
+    remaining: Math.max(0, cap - withdrawn),
+    reached: withdrawn >= cap,
+  };
+}

@@ -40,6 +40,7 @@ type CampaignAccount = {
   tradeCount: number;
   peakIsLowerBound: boolean;
   mfeCovered: number;
+  cap: { cap: number; withdrawn: number; remaining: number; reached: boolean };
 };
 
 type Preset = { key: string; label: string; source: string; caveats: string[] };
@@ -121,6 +122,7 @@ export function CampaignRules() {
                   <th className="py-1 pr-4 text-right font-medium">Floor</th>
                   <th className="py-1 pr-4 text-right font-medium">Left to lose</th>
                   <th className="py-1 pr-4 text-right font-medium">Day one</th>
+                  <th className="py-1 pr-4 text-right font-medium">Cap left</th>
                 </tr>
               </thead>
               <tbody>
@@ -173,6 +175,21 @@ export function CampaignRules() {
                     <td className="py-1.5 pr-4 text-right tabular-nums text-muted-foreground">
                       <MonetaryValue>{money(a.dayOneTarget, a.currency)}</MonetaryValue>
                     </td>
+                    <td
+                      className={`py-1.5 pr-4 text-right tabular-nums ${
+                        a.cap.reached ? "text-destructive" : "text-muted-foreground"
+                      }`}
+                    >
+                      {a.cap.cap === 0 ? (
+                        "—"
+                      ) : (
+                        <span
+                          title={`${money(a.cap.withdrawn, a.currency)} of ${money(a.cap.cap, a.currency)} withdrawn. Counted from recorded payouts, so it is only as current as those are.`}
+                        >
+                          <MonetaryValue>{money(a.cap.remaining, a.currency)}</MonetaryValue>
+                        </span>
+                      )}
+                    </td>
                   </tr>
                 ))}
               </tbody>
@@ -222,6 +239,21 @@ export function CampaignRules() {
               those before trusting the floor.
             </p>
           </div>
+        )}
+
+        {accounts.some((a) => a.cap.reached) && (
+          <p
+            className="flex items-start gap-2 rounded-md border border-destructive/40 bg-destructive/10 px-3 py-2 text-sm"
+            role="status"
+          >
+            <AlertTriangle className="mt-0.5 size-4 shrink-0" aria-hidden />
+            <span>
+              {accounts.filter((a) => a.cap.reached).length === 1
+                ? "An account has withdrawn its lifetime cap."
+                : "Accounts have withdrawn their lifetime cap."}{" "}
+              Those conclude and move to live however healthy the floor looks.
+            </span>
+          </p>
         )}
 
         {accounts.some((a) => a.peakIsLowerBound) && (

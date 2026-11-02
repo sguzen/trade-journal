@@ -20,7 +20,7 @@ process.env.JOURNAL_DATA_DIR = scratch;
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => undefined }) }));
 
 const { eq } = await import("drizzle-orm");
-const { db, propAccounts, propAccountRules, accounts, trades, tradeExcursions } =
+const { db, propAccounts, propAccountRules, accounts, trades, tradeExcursions, propEntries, propReceipts } =
   await import("../src/db");
 const { campaignData, rulesFromRow, stageOf, applyPreset, setBalances } =
   await import("../src/server/campaign");
@@ -101,6 +101,8 @@ function addRules(accountId: string, over: Record<string, unknown> = {}) {
 }
 
 beforeEach(() => {
+  db.delete(propReceipts).run();
+  db.delete(propEntries).run();
   db.delete(propAccountRules).run();
   db.delete(propAccounts).run();
   db.delete(tradeExcursions).run();
@@ -487,5 +489,127 @@ describe("MFE sharpens an intraday floor", () => {
     // The firm trails the day close. What the trade touched is irrelevant.
     expect(assessed.floor).toBe(48_100);
     expect(assessed.peakIsLowerBound).toBe(false);
+  });
+});
+
+describe("the cumulative withdrawal cap", () => {
+  const addPayout = (
+    accountId: string,
+    id: string,
+    amountMinor: number,
+    over: Record<string, unknown> = {},
+  ) => {
+    db.insert(propEntries)
+      .values({
+        id,
+        accountId,
+        firm: "Take Profit Trader",
+        kind: "payout",
+        category: "payout",
+        currency: "USD",
+        amountMinor,
+        splitBps: 10_000, // keep the arithmetic about the cap, not the split
+        feeMinor: 0,
+        occurredOn: "2026-10-20",
+        dueOn: null,
+        status: "completed",
+        parentId: null,
+        reference: "",
+        notes: "",
+        voided: false,
+        revision: 1,
+        createdAt: NOW,
+        updatedAt: NOW,
+        ...over,
+      })
+      .run();
+    return id;
+  };
+
+  const tptAccount = () => {
+    const account = addAccount({ firm: "Take Profit Trader", name: "PRO 50k" });
+    applyPresetSync(account.id, "tpt-pro-50k");
+    return account;
+  };
+
+  it("counts approved and completed payouts toward the cap", () => {
+    const account = tptAccount();
+    addPayout(account.id, "e1", 400_000);
+    addPayout(account.id, "e2", 250_000, { status: "approved" });
+    const assessed = only(campaignData().accounts);
+    expect(assessed.cap).toEqual({
+      cap: 10_000,
+      withdrawn: 6_500,
+      remaining: 3_500,
+      reached: false,
+    });
+  });
+
+  it("ignores payouts the firm has not paid", () => {
+    const account = tptAccount();
+    addPayout(account.id, "e1", 400_000, { status: "requested" });
+    addPayout(account.id, "e2", 400_000, { status: "rejected" });
+    addPayout(account.id, "e3", 400_000, { status: "cancelled" });
+    addPayout(account.id, "e4", 400_000, { voided: true });
+    expect(only(campaignData().accounts).cap.withdrawn).toBe(0);
+  });
+
+  it("counts what arrived once receipts exist, not what was requested", () => {
+    const account = tptAccount();
+    addPayout(account.id, "e1", 400_000);
+    db.insert(propReceipts)
+      .values({
+        id: "r1",
+        payoutId: "e1",
+        kind: "receipt",
+        amountMinor: 350_000,
+        occurredOn: "2026-10-22",
+        reference: "",
+        notes: "",
+        voided: false,
+        createdAt: NOW,
+      })
+      .run();
+    expect(only(campaignData().accounts).cap.withdrawn).toBe(3_500);
+  });
+
+  it("nets a reversal back off the total", () => {
+    const account = tptAccount();
+    addPayout(account.id, "e1", 400_000);
+    for (const [id, kind, amountMinor] of [
+      ["r1", "receipt", 400_000],
+      ["r2", "reversal", 150_000],
+    ] as const) {
+      db.insert(propReceipts)
+        .values({
+          id,
+          payoutId: "e1",
+          kind,
+          amountMinor,
+          occurredOn: "2026-10-22",
+          reference: "",
+          notes: "",
+          voided: false,
+          createdAt: NOW,
+        })
+        .run();
+    }
+    expect(only(campaignData().accounts).cap.withdrawn).toBe(2_500);
+  });
+
+  it("marks the account finished once the cap is met", () => {
+    const account = tptAccount();
+    addPayout(account.id, "e1", 1_000_000);
+    const assessed = only(campaignData().accounts);
+    expect(assessed.cap).toMatchObject({ withdrawn: 10_000, remaining: 0, reached: true });
+    // The floor says nothing about this: the account is alive and finished.
+    expect(assessed.breached).toBe(false);
+  });
+
+  it("reports no cap for a plan that has none", () => {
+    const account = addAccount({ firm: "FundedNext", name: "Flex 50k" });
+    applyPresetSync(account.id, "fundednext-flex-50k");
+    addPayout(account.id, "e1", 400_000);
+    expect(only(campaignData().accounts).cap).toMatchObject({ cap: 0, reached: false });
   });
 });

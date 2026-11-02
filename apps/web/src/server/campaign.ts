@@ -13,7 +13,7 @@
  * nowhere else.
  */
 
-import { eq } from "drizzle-orm";
+import { eq, inArray } from "drizzle-orm";
 
 import {
   type AccountSnapshot,
@@ -21,6 +21,8 @@ import {
   type DerivedBalances,
   FIRM_PRESETS,
   type TradeStep,
+  capStatus,
+  type CapStatus,
   deriveBalances,
   peakFor,
   presetByKey,
@@ -37,13 +39,20 @@ import {
 
 import { dailyCumulative } from "@luxalgo/journal-core";
 
-import { db, propAccountRules, propAccounts } from "@/db";
+import { db, propAccountRules, propAccounts, propEntries, propReceipts } from "@/db";
 import { requireValue } from "./api";
 import { nowIso } from "./ids";
 import { getTimeZone } from "./settings";
 import { queryTrades } from "./trades-query";
 import { savedEstimates } from "./market-data/estimates";
-import { currencyDigits, type PropAccount } from "@/lib/prop-firms";
+import {
+  currencyDigits,
+  expectedPayout,
+  receivedPayout,
+  type PropAccount,
+  type PropEntry,
+  type PropReceipt,
+} from "@/lib/prop-firms";
 
 type RulesRow = typeof propAccountRules.$inferSelect;
 
@@ -104,6 +113,7 @@ export function rulesFromRow(row: RulesRow, account: PropAccount): FirmRuleSet {
     payoutDailyCap: majorOr(row.payoutDailyCapMinor, c),
     payoutMin: majorOr(row.payoutMinMinor, c),
     maxPayouts: row.maxPayouts,
+    payoutLifetimeCap: majorOr(row.payoutLifetimeCapMinor, c),
   };
 }
 
@@ -185,6 +195,12 @@ export type CampaignAccount = {
    * intraday-trailing plan, the peak — and so the floor — is a lower bound.
    */
   mfeCovered: number;
+  /**
+   * Progress toward a cumulative withdrawal cap, when the plan has one. An
+   * account can be finished on this while looking alive on every other
+   * measure, so it is reported beside the floor rather than left to memory.
+   */
+  cap: CapStatus;
 };
 
 export function assess(account: PropAccount, row: RulesRow): CampaignAccount {
@@ -215,6 +231,7 @@ export function assess(account: PropAccount, row: RulesRow): CampaignAccount {
     balanceSource: derived ? "journal" : "manual",
     tradeCount: derived?.tradeCount ?? 0,
     mfeCovered: derived?.mfeCovered ?? 0,
+    cap: capStatus(withdrawnBy(account.id, account.currency), rules),
     peakIsLowerBound,
     dayOneTarget: dayOneTarget(rules),
     evalMinDays: evalMinDays(rules),
@@ -328,6 +345,7 @@ export function applyPreset(accountId: string, presetKey: string): RulesRow {
     payoutDailyCapMinor: minor(r.payoutDailyCap, c),
     payoutMinMinor: minor(r.payoutMin, c),
     maxPayouts: r.maxPayouts,
+    payoutLifetimeCapMinor: minor(r.payoutLifetimeCap, c),
     // Balances start at the account's size; the trader corrects them as the
     // account trades. Guessing a peak would invent a floor.
     startingBalanceMinor: size,
@@ -384,4 +402,46 @@ export function rulesFor(accountId: string): RulesRow | null {
     db.select().from(propAccountRules).where(eq(propAccountRules.accountId, accountId)).get() ??
     null
   );
+}
+
+/**
+ * What this account has actually withdrawn, in whole currency.
+ *
+ * Counted from the tracker's own payout records, so it is exactly as current
+ * as the trader's bookkeeping. A payout with receipts counts what arrived
+ * (minus reversals); one that is approved or completed but has no receipt yet
+ * counts its expected value, because the firm counts money it has sent whether
+ * or not the bank has caught up. Requested, rejected, cancelled and voided
+ * payouts count for nothing.
+ */
+export function withdrawnBy(accountId: string, currency: string): number {
+  const payouts = db
+    .select()
+    .from(propEntries)
+    .where(eq(propEntries.accountId, accountId))
+    .all() as PropEntry[];
+  const live = payouts.filter(
+    (entry) =>
+      entry.kind === "payout" &&
+      !entry.voided &&
+      (entry.status === "approved" || entry.status === "completed"),
+  );
+  if (live.length === 0) return 0;
+
+  const receipts = db
+    .select()
+    .from(propReceipts)
+    .where(
+      inArray(
+        propReceipts.payoutId,
+        live.map((entry) => entry.id),
+      ),
+    )
+    .all() as PropReceipt[];
+
+  const totalMinor = live.reduce((sum, entry) => {
+    const hasReceipt = receipts.some((row) => row.payoutId === entry.id && !row.voided);
+    return sum + (hasReceipt ? receivedPayout(entry.id, receipts) : expectedPayout(entry));
+  }, 0);
+  return majorOr(totalMinor, currency);
 }

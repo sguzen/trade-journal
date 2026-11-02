@@ -238,9 +238,10 @@ export const FIRM_PRESETS: FirmPreset[] = [
       trailStopsAtProfit: 100,
       // The account ends on cumulative withdrawals, not on a payout count.
       maxPayouts: 0,
+      payoutLifetimeCap: 10_000,
     },
     [
-      "The account concludes at $10,000 withdrawn in total and moves to live. That is a cumulative-dollar cap, which these rules cannot express — they count payouts, not their sum. Watch it yourself.",
+      "At $10,000 withdrawn in total the account concludes and moves to live. Tracked against recorded payouts, so it is only as current as those are.",
       "Payouts inside the first 60 days are cut to 50% of profits. Not modelled.",
       "Split is 80% on PRO and 90% at PRO+. The lower figure is modelled.",
     ],
