@@ -39,6 +39,7 @@ type CampaignAccount = {
   balanceSource: "journal" | "manual";
   tradeCount: number;
   peakIsLowerBound: boolean;
+  mfeCovered: number;
 };
 
 type Preset = { key: string; label: string; source: string; caveats: string[] };
@@ -156,7 +157,7 @@ export function CampaignRules() {
                       {a.peakIsLowerBound && (
                         <span
                           className="ml-1 text-xs text-muted-foreground"
-                          title="This plan trails equity reached inside a trade, which closed round trips do not record. The real floor is at least this high."
+                          title={`This plan trails equity reached inside a trade. ${a.tradeCount - a.mfeCovered} of ${a.tradeCount} trades have no MFE estimate, so the real floor is at least this high. Fetch market data on those trades to make it exact.`}
                         >
                           ≥
                         </span>
@@ -225,9 +226,10 @@ export function CampaignRules() {
 
         {accounts.some((a) => a.peakIsLowerBound) && (
           <p className="text-xs text-muted-foreground">
-            ≥ marks a floor computed from a peak the journal can only bound from below. Those plans
-            trail equity reached inside a trade, and closed round trips do not record it — so the
-            real floor is at least this high, and the room left is at most what is shown.
+            ≥ marks a floor whose peak is bounded from below. Those plans trail equity reached
+            inside a trade, so each trade needs an MFE estimate; trades without one contribute only
+            their closing balance. Fetch market data on a trade to fill its estimate in, and the
+            floor becomes exact. Until then the room left is at most what is shown.
           </p>
         )}
 

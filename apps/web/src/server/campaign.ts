@@ -20,6 +20,7 @@ import {
   DEFAULT_RULES,
   type DerivedBalances,
   FIRM_PRESETS,
+  type TradeStep,
   deriveBalances,
   peakFor,
   presetByKey,
@@ -34,13 +35,14 @@ import {
   shouldBreach,
 } from "@desk/campaign";
 
-import { dailyCumulative, equityCurve } from "@luxalgo/journal-core";
+import { dailyCumulative } from "@luxalgo/journal-core";
 
 import { db, propAccountRules, propAccounts } from "@/db";
 import { requireValue } from "./api";
 import { nowIso } from "./ids";
 import { getTimeZone } from "./settings";
 import { queryTrades } from "./trades-query";
+import { savedEstimates } from "./market-data/estimates";
 import { currencyDigits, type PropAccount } from "@/lib/prop-firms";
 
 type RulesRow = typeof propAccountRules.$inferSelect;
@@ -119,21 +121,32 @@ export function snapshotFromRow(row: RulesRow, account: PropAccount): AccountSna
 /**
  * What the journal says this account's balances are.
  *
- * Only closed round trips count. An open position has not moved the balance a
- * firm would act on, and its excursion is exactly what a journal of round
- * trips cannot see.
+ * Only closed round trips count: an open position has not moved the balance a
+ * firm would act on.
+ *
+ * Each trade carries its MFE where the journal has one, which is what lets an
+ * intraday-trailing floor be exact rather than a bound. `savedEstimates`
+ * supplies them and drops any whose fingerprint no longer matches the trade's
+ * fills, so a re-imported or corrected trade loses its stale excursion instead
+ * of quietly keeping it.
  */
 export function derivedFor(account: PropAccount, row: RulesRow): DerivedBalances | null {
   if (!account.journalAccountId) return null;
   const { trades } = queryTrades({ accountIds: [account.journalAccountId] });
   const timeZone = getTimeZone();
   const dayCloseCum = dailyCumulative(trades, timeZone).map((point) => point.cumNetPnl);
-  const tradeCloseCum = equityCurve(trades).map((point) => point.cumNetPnl);
-  return deriveBalances(
-    majorOr(row.startingBalanceMinor, account.currency),
-    dayCloseCum,
-    tradeCloseCum,
-  );
+
+  const estimates = savedEstimates(trades);
+  // equityCurve orders by close time, which is the order balances move in.
+  const closed = trades
+    .filter((trade) => trade.closedAt)
+    .sort((a, b) => a.closedAt!.localeCompare(b.closedAt!));
+  const steps: TradeStep[] = closed.map((trade) => ({
+    netPnl: trade.netPnl,
+    mfe: estimates.get(trade.key)?.estimate.mfe ?? null,
+  }));
+
+  return deriveBalances(majorOr(row.startingBalanceMinor, account.currency), dayCloseCum, steps);
 }
 
 export type CampaignAccount = {
@@ -167,6 +180,11 @@ export type CampaignAccount = {
    * the journal does not record.
    */
   peakIsLowerBound: boolean;
+  /**
+   * Closed trades whose MFE the journal knows. Short of `tradeCount` on an
+   * intraday-trailing plan, the peak — and so the floor — is a lower bound.
+   */
+  mfeCovered: number;
 };
 
 export function assess(account: PropAccount, row: RulesRow): CampaignAccount {
@@ -196,6 +214,7 @@ export function assess(account: PropAccount, row: RulesRow): CampaignAccount {
     currentBalance: snapshot.currentBalance,
     balanceSource: derived ? "journal" : "manual",
     tradeCount: derived?.tradeCount ?? 0,
+    mfeCovered: derived?.mfeCovered ?? 0,
     peakIsLowerBound,
     dayOneTarget: dayOneTarget(rules),
     evalMinDays: evalMinDays(rules),

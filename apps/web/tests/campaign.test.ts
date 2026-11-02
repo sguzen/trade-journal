@@ -20,10 +20,10 @@ process.env.JOURNAL_DATA_DIR = scratch;
 vi.mock("next/headers", () => ({ cookies: async () => ({ get: () => undefined }) }));
 
 const { eq } = await import("drizzle-orm");
-const { db, propAccounts, propAccountRules, accounts, trades } = await import("../src/db");
-const { campaignData, rulesFromRow, stageOf, applyPreset, setBalances } = await import(
-  "../src/server/campaign",
-);
+const { db, propAccounts, propAccountRules, accounts, trades, tradeExcursions } =
+  await import("../src/db");
+const { campaignData, rulesFromRow, stageOf, applyPreset, setBalances } =
+  await import("../src/server/campaign");
 const { rulesFor } = await import("../src/server/campaign");
 const applyPresetSync = applyPreset;
 const setBalancesSync = setBalances;
@@ -103,6 +103,7 @@ function addRules(accountId: string, over: Record<string, unknown> = {}) {
 beforeEach(() => {
   db.delete(propAccountRules).run();
   db.delete(propAccounts).run();
+  db.delete(tradeExcursions).run();
   db.delete(trades).run();
   db.delete(accounts).run();
 });
@@ -262,38 +263,38 @@ describe("balances", () => {
   });
 });
 
+const addJournalAccount = (id = "j1") => {
+  db.insert(accounts)
+    .values({ id, name: "NQ", broker: "manual", kind: "manual", currency: "USD", createdAt: NOW })
+    .run();
+  return id;
+};
+
+const addTrade = (accountId: string, key: string, closedAt: string, netPnl: number) => {
+  db.insert(trades)
+    .values({
+      key,
+      accountId,
+      symbol: "NQ",
+      direction: "long",
+      status: netPnl >= 0 ? "win" : "loss",
+      openedAt: closedAt,
+      closedAt,
+      quantity: 1,
+      openQuantity: 0,
+      avgEntry: 100,
+      avgExit: 100 + netPnl,
+      grossPnl: netPnl,
+      fees: 0,
+      netPnl,
+      executionCount: 2,
+      executionIdsJson: "[]",
+      exitsJson: "[]",
+    })
+    .run();
+};
+
 describe("balances derived from the journal", () => {
-  const addJournalAccount = (id = "j1") => {
-    db.insert(accounts)
-      .values({ id, name: "NQ", broker: "manual", kind: "manual", currency: "USD", createdAt: NOW })
-      .run();
-    return id;
-  };
-
-  const addTrade = (accountId: string, key: string, closedAt: string, netPnl: number) => {
-    db.insert(trades)
-      .values({
-        key,
-        accountId,
-        symbol: "NQ",
-        direction: "long",
-        status: netPnl >= 0 ? "win" : "loss",
-        openedAt: closedAt,
-        closedAt,
-        quantity: 1,
-        openQuantity: 0,
-        avgEntry: 100,
-        avgExit: 100 + netPnl,
-        grossPnl: netPnl,
-        fees: 0,
-        netPnl,
-        executionCount: 2,
-        executionIdsJson: "[]",
-        exitsJson: "[]",
-      })
-      .run();
-  };
-
   it("uses the journal over a stale typed-in balance", () => {
     // The whole reason for deriving: a number typed in a week ago is wrong the
     // moment the next trade closes.
@@ -366,5 +367,125 @@ describe("balances derived from the journal", () => {
     expect(assessed.balanceSource).toBe("journal");
     expect(assessed.tradeCount).toBe(0);
     expect(assessed.currentBalance).toBe(50_000);
+  });
+});
+
+describe("MFE sharpens an intraday floor", () => {
+  const intraday = (accountId: string) =>
+    db
+      .update(propAccountRules)
+      .set({ fundedDrawdownMinor: 100_000, fundedDrawdownType: "trailing" })
+      .where(eq(propAccountRules.accountId, accountId))
+      .run();
+
+  it("lifts the peak to what the trade actually reached", async () => {
+    const { estimateFingerprint } = await import("../src/server/market-data/estimates");
+    const { queryTrades } = await import("../src/server/trades-query");
+
+    const journalId = addJournalAccount("jm1");
+    const account = addAccount({ journalAccountId: journalId });
+    applyPresetSync(account.id, "blue-guardian-reserve-50k");
+    intraday(account.id);
+    // One trade that ran +900 in the money and closed at +100.
+    addTrade(journalId, "m1", "2026-10-20T15:00:00.000Z", 100);
+
+    const withoutMfe = only(campaignData().accounts);
+    // No excursion yet: the peak can only be the 50,100 close.
+    expect(withoutMfe.floor).toBe(49_100);
+    expect(withoutMfe.peakIsLowerBound).toBe(true);
+    expect(withoutMfe.mfeCovered).toBe(0);
+
+    const [trade] = queryTrades({ accountIds: [journalId] }).trades;
+    db.insert(tradeExcursions)
+      .values({
+        tradeKey: "m1",
+        fingerprint: estimateFingerprint(trade!),
+        provider: "csv",
+        symbol: "NQ",
+        resolution: "1m",
+        fetchedAt: NOW,
+        estimateJson: JSON.stringify({
+          mae: -200,
+          mfe: 900,
+          sampledBars: 60,
+          excludedBars: 0,
+          warnings: [],
+        }),
+      })
+      .run();
+
+    const withMfe = only(campaignData().accounts);
+    // Peak 50,900 − 1,000 = 49,900: 800 higher than the close-only floor, and
+    // now exact rather than a bound.
+    expect(withMfe.floor).toBe(49_900);
+    expect(withMfe.peakIsLowerBound).toBe(false);
+    expect(withMfe.mfeCovered).toBe(1);
+  });
+
+  it("ignores an excursion whose trade has since changed", async () => {
+    // A stale estimate is worse than none: it would claim exactness about a
+    // trade it no longer describes.
+    const journalId = addJournalAccount("jm2");
+    const account = addAccount({ journalAccountId: journalId });
+    applyPresetSync(account.id, "blue-guardian-reserve-50k");
+    intraday(account.id);
+    addTrade(journalId, "m2", "2026-10-20T15:00:00.000Z", 100);
+
+    db.insert(tradeExcursions)
+      .values({
+        tradeKey: "m2",
+        fingerprint: "a fingerprint from a different version of this trade",
+        provider: "csv",
+        symbol: "NQ",
+        resolution: "1m",
+        fetchedAt: NOW,
+        estimateJson: JSON.stringify({
+          mae: -200,
+          mfe: 900,
+          sampledBars: 60,
+          excludedBars: 0,
+          warnings: [],
+        }),
+      })
+      .run();
+
+    const assessed = only(campaignData().accounts);
+    expect(assessed.mfeCovered).toBe(0);
+    expect(assessed.peakIsLowerBound).toBe(true);
+    expect(assessed.floor).toBe(49_100);
+  });
+
+  it("leaves an end-of-day floor untouched however large the MFE", async () => {
+    const { estimateFingerprint } = await import("../src/server/market-data/estimates");
+    const { queryTrades } = await import("../src/server/trades-query");
+
+    const journalId = addJournalAccount("jm3");
+    const account = addAccount({ journalAccountId: journalId });
+    applyPresetSync(account.id, "blue-guardian-reserve-50k"); // end-of-day trailing
+    addTrade(journalId, "m3", "2026-10-20T15:00:00.000Z", 100);
+
+    const [trade] = queryTrades({ accountIds: [journalId] }).trades;
+    db.insert(tradeExcursions)
+      .values({
+        tradeKey: "m3",
+        fingerprint: estimateFingerprint(trade!),
+        provider: "csv",
+        symbol: "NQ",
+        resolution: "1m",
+        fetchedAt: NOW,
+        estimateJson: JSON.stringify({
+          mae: -200,
+          mfe: 5_000,
+          sampledBars: 60,
+          excludedBars: 0,
+          warnings: [],
+        }),
+      })
+      .run();
+
+    const assessed = only(campaignData().accounts);
+    // The firm trails the day close. What the trade touched is irrelevant.
+    expect(assessed.floor).toBe(48_100);
+    expect(assessed.peakIsLowerBound).toBe(false);
   });
 });
