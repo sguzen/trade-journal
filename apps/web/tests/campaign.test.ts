@@ -24,7 +24,8 @@ const { db, propAccounts, propAccountRules, accounts, trades, tradeExcursions, p
   await import("../src/db");
 const { campaignData, rulesFromRow, stageOf, applyPreset, setBalances } =
   await import("../src/server/campaign");
-const { rulesFor } = await import("../src/server/campaign");
+const { rulesFor, saveRules } = await import("../src/server/campaign");
+const saveRulesSync = saveRules;
 const applyPresetSync = applyPreset;
 const setBalancesSync = setBalances;
 
@@ -611,5 +612,98 @@ describe("the cumulative withdrawal cap", () => {
     applyPresetSync(account.id, "fundednext-flex-50k");
     addPayout(account.id, "e1", 400_000);
     expect(only(campaignData().accounts).cap).toMatchObject({ cap: 0, reached: false });
+  });
+});
+
+describe("hand-written rules", () => {
+  const base = () => ({
+    payoutProfitTarget: 2_000,
+    minProfitableDays: 5,
+    minDailyProfit: 150,
+    payoutSplitPct: 90,
+    evalProfitTarget: 3_000,
+    consistencyPctEval: 50,
+    consistencyPctFunded: null,
+    dailyLossLimit: null,
+    drawdownAmount: 2_000,
+    drawdownType: "trailing_eod",
+    trailStopsAtProfit: 100,
+    fundedDrawdownAmount: null,
+    fundedDrawdownType: null,
+    payoutCap: 1_500,
+    payoutBuffer: 0,
+    payoutDailyCap: 0,
+    payoutMin: 0,
+    maxPayouts: 5,
+    payoutLifetimeCap: 0,
+  });
+
+  it("creates rules for an account that had none", () => {
+    const account = addAccount();
+    saveRulesSync(account.id, base());
+    const assessed = only(campaignData().accounts);
+    expect(assessed.dayOneTarget).toBe(1_400); // 2,000 − 4 × 150
+    expect(assessed.editable.drawdownAmount).toBe(2_000);
+  });
+
+  it("keeps null distinct from zero", () => {
+    // The distinction the engine rests on: no daily loss limit is not a $0
+    // one, and a floor that never locks is not one locked at zero.
+    const account = addAccount();
+    saveRulesSync(account.id, { ...base(), dailyLossLimit: null, trailStopsAtProfit: null });
+    const first = only(campaignData().accounts);
+    expect(first.editable.dailyLossLimit).toBeNull();
+    expect(first.editable.trailStopsAtProfit).toBeNull();
+    expect(first.isFlex).toBe(true);
+
+    saveRulesSync(account.id, { ...base(), dailyLossLimit: 0, trailStopsAtProfit: 0 });
+    const second = only(campaignData().accounts);
+    expect(second.editable.dailyLossLimit).toBe(0);
+    expect(second.editable.trailStopsAtProfit).toBe(0);
+    expect(second.isFlex).toBe(false); // a $0 limit is still a limit
+  });
+
+  it("overwrites a preset without touching the balances", () => {
+    // Editing a drawdown must not move the floor by resetting the balance
+    // underneath it.
+    const account = addAccount();
+    applyPresetSync(account.id, "fundednext-flex-50k");
+    setBalancesSync(account.id, { current: 51_200, peak: 51_200 });
+    saveRulesSync(account.id, { ...base(), drawdownAmount: 1_000 });
+    const assessed = only(campaignData().accounts);
+    expect(assessed.currentBalance).toBe(51_200);
+    expect(assessed.editable.drawdownAmount).toBe(1_000);
+    // 51,200 − 1,000 = 50,200, capped by the +100 lock these rules carry.
+    expect(assessed.floor).toBe(50_100);
+  });
+
+  it("refuses a drawdown type it does not model", () => {
+    const account = addAccount();
+    expect(() => saveRulesSync(account.id, { ...base(), drawdownType: "vibes" })).toThrow();
+  });
+
+  it("refuses impossible percentages and negative money", () => {
+    const account = addAccount();
+    expect(() => saveRulesSync(account.id, { ...base(), payoutSplitPct: 0 })).toThrow();
+    expect(() => saveRulesSync(account.id, { ...base(), payoutSplitPct: 140 })).toThrow();
+    expect(() => saveRulesSync(account.id, { ...base(), consistencyPctEval: 150 })).toThrow();
+    expect(() => saveRulesSync(account.id, { ...base(), drawdownAmount: -1 })).toThrow();
+    expect(() => saveRulesSync(account.id, { ...base(), minProfitableDays: 2.5 })).toThrow();
+  });
+
+  it("refuses an account that does not exist", () => {
+    expect(() => saveRulesSync("ghost", base())).toThrow();
+  });
+
+  it("round-trips a funded-stage override", () => {
+    const account = addAccount({ program: "funded" });
+    saveRulesSync(account.id, {
+      ...base(),
+      fundedDrawdownAmount: 1_000,
+      fundedDrawdownType: "trailing",
+    });
+    const assessed = only(campaignData().accounts);
+    expect(assessed.editable.fundedDrawdownAmount).toBe(1_000);
+    expect(assessed.editable.fundedDrawdownType).toBe("trailing");
   });
 });

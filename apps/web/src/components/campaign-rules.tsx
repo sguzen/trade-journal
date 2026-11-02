@@ -17,6 +17,7 @@ import { AlertTriangle, ShieldCheck } from "lucide-react";
 
 import { Card, CardContent, CardHeader, CardTitle } from "./ui/card";
 import { OptionSelect } from "./ui/option-select";
+import { RulesEditor, type RulesInput } from "./campaign-rules-editor";
 import { MonetaryValue } from "./privacy";
 import { useApi } from "@/lib/use-api";
 import { propMoney } from "@/lib/prop-firms";
@@ -41,6 +42,7 @@ type CampaignAccount = {
   peakIsLowerBound: boolean;
   mfeCovered: number;
   cap: { cap: number; withdrawn: number; remaining: number; reached: boolean };
+  editable: RulesInput;
 };
 
 type Preset = { key: string; label: string; source: string; caveats: string[] };
@@ -57,6 +59,7 @@ const money = (value: number, currency: string) => propMoney(Math.round(value * 
 export function CampaignRules() {
   const { data, refresh } = useApi<CampaignPayload>("/api/campaign");
   const [busy, setBusy] = useState("");
+  const [editing, setEditing] = useState("");
   const [error, setError] = useState("");
   const accounts = data?.accounts ?? [];
   const unconfigured = data?.unconfigured ?? [];
@@ -131,6 +134,13 @@ export function CampaignRules() {
                     <td className="py-1.5 pr-4">
                       <span className="font-medium">{a.firm}</span>{" "}
                       <span className="text-muted-foreground">{a.name}</span>
+                      <button
+                        type="button"
+                        className="ml-2 text-xs text-muted-foreground underline underline-offset-2"
+                        onClick={() => setEditing(editing === a.accountId ? "" : a.accountId)}
+                      >
+                        {editing === a.accountId ? "close" : "rules"}
+                      </button>
                       {a.unrecordedBreach && (
                         <span className="ml-2 rounded bg-destructive/15 px-1.5 py-0.5 text-xs text-destructive">
                           breached
@@ -240,6 +250,23 @@ export function CampaignRules() {
             </p>
           </div>
         )}
+
+        {editing &&
+          accounts
+            .filter((a) => a.accountId === editing)
+            .map((a) => (
+              <RulesEditor
+                key={a.accountId}
+                accountId={a.accountId}
+                label={`${a.firm} ${a.name}`}
+                initial={a.editable}
+                onCancel={() => setEditing("")}
+                onSaved={() => {
+                  setEditing("");
+                  refresh();
+                }}
+              />
+            ))}
 
         {accounts.some((a) => a.cap.reached) && (
           <p

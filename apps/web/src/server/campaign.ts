@@ -201,6 +201,8 @@ export type CampaignAccount = {
    * measure, so it is reported beside the floor rather than left to memory.
    */
   cap: CapStatus;
+  /** The stored rules in whole currency, for the editor to prefill from. */
+  editable: RulesInput;
 };
 
 export function assess(account: PropAccount, row: RulesRow): CampaignAccount {
@@ -232,6 +234,27 @@ export function assess(account: PropAccount, row: RulesRow): CampaignAccount {
     tradeCount: derived?.tradeCount ?? 0,
     mfeCovered: derived?.mfeCovered ?? 0,
     cap: capStatus(withdrawnBy(account.id, account.currency), rules),
+    editable: {
+      payoutProfitTarget: rules.payoutProfitTarget,
+      minProfitableDays: rules.minProfitableDays,
+      minDailyProfit: rules.minDailyProfit,
+      payoutSplitPct: rules.payoutSplitPct,
+      evalProfitTarget: rules.evalProfitTarget,
+      consistencyPctEval: rules.consistencyPctEval,
+      consistencyPctFunded: rules.consistencyPctFunded,
+      dailyLossLimit: rules.dailyLossLimit,
+      drawdownAmount: rules.drawdownAmount,
+      drawdownType: rules.drawdownType,
+      trailStopsAtProfit: rules.trailStopsAtProfit,
+      fundedDrawdownAmount: rules.fundedDrawdownAmount,
+      fundedDrawdownType: rules.fundedDrawdownType,
+      payoutCap: rules.payoutCap,
+      payoutBuffer: rules.payoutBuffer,
+      payoutDailyCap: rules.payoutDailyCap,
+      payoutMin: rules.payoutMin,
+      maxPayouts: rules.maxPayouts,
+      payoutLifetimeCap: rules.payoutLifetimeCap,
+    },
     peakIsLowerBound,
     dayOneTarget: dayOneTarget(rules),
     evalMinDays: evalMinDays(rules),
@@ -444,4 +467,152 @@ export function withdrawnBy(accountId: string, currency: string): number {
     return sum + (hasReceipt ? receivedPayout(entry.id, receipts) : expectedPayout(entry));
   }, 0);
   return majorOr(totalMinor, currency);
+}
+
+/**
+ * Hand-written rules, for the plans no preset covers.
+ *
+ * Nullable fields carry the distinction the whole engine rests on: a plan with
+ * NO daily loss limit is not a plan with a $0 one, and a trailing floor that
+ * never locks is not one that locks at zero. The API therefore takes `null`
+ * for those and refuses to coerce a blank into a number.
+ */
+export interface RulesInput {
+  payoutProfitTarget: number;
+  minProfitableDays: number;
+  minDailyProfit: number;
+  payoutSplitPct: number;
+  evalProfitTarget: number;
+  consistencyPctEval: number | null;
+  consistencyPctFunded: number | null;
+  dailyLossLimit: number | null;
+  drawdownAmount: number;
+  drawdownType: string;
+  trailStopsAtProfit: number | null;
+  fundedDrawdownAmount: number | null;
+  fundedDrawdownType: string | null;
+  payoutCap: number;
+  payoutBuffer: number;
+  payoutDailyCap: number;
+  payoutMin: number;
+  maxPayouts: number;
+  payoutLifetimeCap: number;
+}
+
+const DRAWDOWN_INPUT = ["static", "trailing", "trailing_eod"] as const;
+
+const money = (value: unknown, title: string): number => {
+  requireValue(
+    typeof value === "number" && Number.isFinite(value) && value >= 0,
+    `Enter ${title} as a number of 0 or more.`,
+  );
+  return value as number;
+};
+
+const moneyOrNull = (value: unknown, title: string): number | null =>
+  value === null || value === undefined ? null : money(value, title);
+
+const percent = (value: unknown, title: string): number | null => {
+  if (value === null || value === undefined) return null;
+  requireValue(
+    typeof value === "number" && Number.isFinite(value) && value > 0 && value <= 100,
+    `Enter ${title} as a percentage between 0 and 100, or leave it blank for none.`,
+  );
+  return value as number;
+};
+
+const count = (value: unknown, title: string): number => {
+  requireValue(
+    typeof value === "number" && Number.isInteger(value) && value >= 0,
+    `Enter ${title} as a whole number of 0 or more.`,
+  );
+  return value as number;
+};
+
+const drawdownType = (value: unknown, title: string, allowNull: boolean): string | null => {
+  if ((value === null || value === undefined || value === "") && allowNull) return null;
+  requireValue(
+    typeof value === "string" && (DRAWDOWN_INPUT as readonly string[]).includes(value),
+    `Choose ${title}.`,
+  );
+  return value as string;
+};
+
+/**
+ * Write a rule set directly. Creates the row when the account has none, so an
+ * account can start from a hand-written plan rather than from a preset.
+ *
+ * Balances are deliberately untouched: they are either derived from the
+ * journal or set through `setBalances`, and silently resetting them while
+ * editing a drawdown would move the floor for a reason nobody asked for.
+ */
+export function saveRules(accountId: string, input: unknown): RulesRow {
+  const account = (db.select().from(propAccounts).all() as PropAccount[]).find(
+    (a) => a.id === accountId,
+  );
+  requireValue(account, "Choose an account that exists.");
+  requireValue(
+    input && typeof input === "object" && !Array.isArray(input),
+    "Provide the rules to save.",
+  );
+  const chosen = account as PropAccount;
+  const c = chosen.currency;
+  const raw = input as Record<string, unknown>;
+
+  const split = raw.payoutSplitPct;
+  requireValue(
+    typeof split === "number" && Number.isFinite(split) && split > 0 && split <= 100,
+    "Enter the payout split as a percentage between 0 and 100.",
+  );
+
+  const fields = {
+    payoutProfitTargetMinor: minor(money(raw.payoutProfitTarget, "the payout profit target"), c),
+    minProfitableDays: count(raw.minProfitableDays, "the qualifying days"),
+    minDailyProfitMinor: minor(money(raw.minDailyProfit, "the qualifying-day minimum"), c),
+    payoutSplitBps: Math.round((split as number) * 100),
+    evalProfitTargetMinor: minor(money(raw.evalProfitTarget, "the evaluation target"), c),
+    consistencyPctEval: percent(raw.consistencyPctEval, "the evaluation consistency rule"),
+    consistencyPctFunded: percent(raw.consistencyPctFunded, "the funded consistency rule"),
+    dailyLossLimitMinor: minorOrNull(moneyOrNull(raw.dailyLossLimit, "the daily loss limit"), c),
+    drawdownMinor: minor(money(raw.drawdownAmount, "the drawdown"), c),
+    drawdownType: drawdownType(raw.drawdownType, "a drawdown type", false) as string,
+    trailStopsAtProfitMinor: minorOrNull(
+      moneyOrNull(raw.trailStopsAtProfit, "the trailing lock"),
+      c,
+    ),
+    fundedDrawdownMinor: minorOrNull(
+      moneyOrNull(raw.fundedDrawdownAmount, "the funded drawdown"),
+      c,
+    ),
+    fundedDrawdownType: drawdownType(raw.fundedDrawdownType, "a funded drawdown type", true),
+    payoutCapMinor: minor(money(raw.payoutCap, "the payout cap"), c),
+    payoutBufferMinor: minor(money(raw.payoutBuffer, "the payout buffer"), c),
+    payoutDailyCapMinor: minor(money(raw.payoutDailyCap, "the daily payout cap"), c),
+    payoutMinMinor: minor(money(raw.payoutMin, "the minimum payout"), c),
+    maxPayouts: count(raw.maxPayouts, "the payout limit"),
+    payoutLifetimeCapMinor: minor(money(raw.payoutLifetimeCap, "the lifetime withdrawal cap"), c),
+  };
+
+  const existing = rulesFor(accountId);
+  const now = nowIso();
+  if (existing) {
+    db.update(propAccountRules)
+      .set({ ...fields, updatedAt: now })
+      .where(eq(propAccountRules.accountId, accountId))
+      .run();
+    return { ...existing, ...fields, updatedAt: now };
+  }
+
+  const size = chosen.sizeMinor ?? 0;
+  const row = {
+    accountId,
+    ...fields,
+    startingBalanceMinor: size,
+    currentBalanceMinor: size,
+    peakBalanceMinor: size,
+    createdAt: now,
+    updatedAt: now,
+  };
+  db.insert(propAccountRules).values(row).run();
+  return row as RulesRow;
 }

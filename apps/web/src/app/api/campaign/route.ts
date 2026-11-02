@@ -1,4 +1,4 @@
-import { applyPreset, campaignData, setBalances } from "@/server/campaign";
+import { applyPreset, campaignData, saveRules, setBalances } from "@/server/campaign";
 import { bad, handler, ok, requireValue } from "@/server/api";
 
 export const GET = handler(() => ok(campaignData()));
@@ -26,6 +26,11 @@ export const POST = handler(async (request: Request) => {
     const presetKey = typeof input.presetKey === "string" ? input.presetKey : "";
     requireValue(presetKey, "Choose a preset.");
     applyPreset(accountId, presetKey);
+    return ok(campaignData());
+  }
+
+  if (input.action === "rules") {
+    saveRules(accountId, input.rules);
     return ok(campaignData());
   }
 
