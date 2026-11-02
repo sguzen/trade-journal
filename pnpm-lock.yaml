@@ -32,6 +32,9 @@ importers:
       '@ai-sdk/openai':
         specifier: ^4.0.64
         version: 4.0.64(zod@4.4.3)
+      '@desk/campaign':
+        specifier: workspace:*
+        version: link:../../packages/campaign
       '@dnd-kit/core':
         specifier: 6.3.1
         version: 6.3.1(react-dom@19.2.8(react@19.2.8))(react@19.2.8)

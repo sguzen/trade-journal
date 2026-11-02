@@ -177,6 +177,21 @@ CREATE TABLE IF NOT EXISTS prop_audit (
  after_json TEXT NOT NULL, reason TEXT NOT NULL, created_at TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS prop_audit_entity ON prop_audit(entity_type, entity_id);
+CREATE TABLE IF NOT EXISTS prop_account_rules (
+ account_id TEXT PRIMARY KEY REFERENCES prop_accounts(id) ON DELETE CASCADE,
+ payout_profit_target_minor INTEGER NOT NULL DEFAULT 0, min_profitable_days INTEGER NOT NULL DEFAULT 0,
+ min_daily_profit_minor INTEGER NOT NULL DEFAULT 0, payout_split_bps INTEGER NOT NULL DEFAULT 9000,
+ eval_profit_target_minor INTEGER NOT NULL DEFAULT 0, consistency_pct_eval REAL,
+ consistency_pct_funded REAL, daily_loss_limit_minor INTEGER,
+ drawdown_minor INTEGER NOT NULL DEFAULT 0, drawdown_type TEXT NOT NULL DEFAULT 'trailing_eod',
+ trail_stops_at_profit_minor INTEGER, funded_drawdown_minor INTEGER, funded_drawdown_type TEXT,
+ payout_cap_minor INTEGER NOT NULL DEFAULT 0, payout_buffer_minor INTEGER NOT NULL DEFAULT 0,
+ payout_daily_cap_minor INTEGER NOT NULL DEFAULT 0, payout_min_minor INTEGER NOT NULL DEFAULT 0,
+ max_payouts INTEGER NOT NULL DEFAULT 5,
+ starting_balance_minor INTEGER NOT NULL DEFAULT 0, current_balance_minor INTEGER NOT NULL DEFAULT 0,
+ peak_balance_minor INTEGER NOT NULL DEFAULT 0,
+ created_at TEXT NOT NULL, updated_at TEXT NOT NULL
+);
 
 CREATE TABLE IF NOT EXISTS import_sources (
  id TEXT PRIMARY KEY, account_id TEXT NOT NULL REFERENCES accounts(id) ON DELETE CASCADE,
