@@ -356,3 +356,50 @@ export const propAudit = sqliteTable(
   },
   (table) => [index("prop_audit_entity").on(table.entityType, table.entityId)],
 );
+
+/**
+ * The rule snapshot a prop account is judged against, and the balances it is
+ * judged on.
+ *
+ * Snapshotted per account rather than looked up per firm: firms change terms,
+ * and a global lookup would silently rewrite the history of every past account
+ * the day a plan is updated. One row per account, so the absence of a row
+ * means "rules not recorded yet" rather than "no rules".
+ */
+export const propAccountRules = sqliteTable("prop_account_rules", {
+  accountId: text("account_id")
+    .primaryKey()
+    .references(() => propAccounts.id, { onDelete: "cascade" }),
+
+  payoutProfitTargetMinor: integer("payout_profit_target_minor").notNull().default(0),
+  minProfitableDays: integer("min_profitable_days").notNull().default(0),
+  minDailyProfitMinor: integer("min_daily_profit_minor").notNull().default(0),
+  payoutSplitBps: integer("payout_split_bps").notNull().default(9000),
+
+  evalProfitTargetMinor: integer("eval_profit_target_minor").notNull().default(0),
+  consistencyPctEval: real("consistency_pct_eval"),
+  consistencyPctFunded: real("consistency_pct_funded"),
+  dailyLossLimitMinor: integer("daily_loss_limit_minor"),
+
+  drawdownMinor: integer("drawdown_minor").notNull().default(0),
+  drawdownType: text("drawdown_type").notNull().default("trailing_eod"),
+  trailStopsAtProfitMinor: integer("trail_stops_at_profit_minor"),
+  fundedDrawdownMinor: integer("funded_drawdown_minor"),
+  fundedDrawdownType: text("funded_drawdown_type"),
+
+  payoutCapMinor: integer("payout_cap_minor").notNull().default(0),
+  payoutBufferMinor: integer("payout_buffer_minor").notNull().default(0),
+  payoutDailyCapMinor: integer("payout_daily_cap_minor").notNull().default(0),
+  payoutMinMinor: integer("payout_min_minor").notNull().default(0),
+  maxPayouts: integer("max_payouts").notNull().default(5),
+  /** Total withdrawals that conclude the account. 0 = no such cap. */
+  payoutLifetimeCapMinor: integer("payout_lifetime_cap_minor").notNull().default(0),
+
+  /** Balances the floor is computed from, in minor units of the account currency. */
+  startingBalanceMinor: integer("starting_balance_minor").notNull().default(0),
+  currentBalanceMinor: integer("current_balance_minor").notNull().default(0),
+  peakBalanceMinor: integer("peak_balance_minor").notNull().default(0),
+
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+});

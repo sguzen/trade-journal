@@ -29,6 +29,13 @@ const createDb = () => {
   if (!executionColumns.some((column) => column.name === "import_metadata_json")) {
     sqlite.exec("ALTER TABLE executions ADD COLUMN import_metadata_json TEXT");
   }
+  // Additive upgrade: rule rows written before plans had a cumulative cap.
+  const ruleColumns = sqlite.pragma("table_info(prop_account_rules)") as { name: string }[];
+  if (ruleColumns.length && !ruleColumns.some((c) => c.name === "payout_lifetime_cap_minor")) {
+    sqlite.exec(
+      "ALTER TABLE prop_account_rules ADD COLUMN payout_lifetime_cap_minor INTEGER NOT NULL DEFAULT 0",
+    );
+  }
   // Materialize CSV bounds once so connection and range lookups never scan candle JSON.
   const csvColumns = sqlite.pragma("table_info(market_csv_datasets)") as { name: string }[];
   sqlite.transaction(() => {
